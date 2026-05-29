@@ -20,6 +20,8 @@ from .models import (
     RiskThreat,
     TaxonomyEntry,
     ThreatLibrary,
+    ThreatPersona,
+    ThreatSource,
     VerificationTest,
     build_taxonomy_snapshot,
 )
@@ -175,6 +177,8 @@ class ComponentInstanceThreatSerializer(serializers.ModelSerializer):
     threat_name_display = serializers.SerializerMethodField()
     taxonomy_entries = serializers.SerializerMethodField()
     component_name = serializers.CharField(source="component.name", read_only=True)
+    threat_personas = serializers.SerializerMethodField()
+    threat_sources = serializers.SerializerMethodField()
     countermeasures = serializers.SerializerMethodField()
 
     # Write fields - accept threat_name for custom threats
@@ -198,6 +202,10 @@ class ComponentInstanceThreatSerializer(serializers.ModelSerializer):
             "dismissal_reason",
             "format_metadata",
             "display_order",
+            "impact_description",
+            "threat_actor_text",
+            "threat_personas",
+            "threat_sources",
             "countermeasures",
             "created_at",
             "updated_at",
@@ -209,6 +217,8 @@ class ComponentInstanceThreatSerializer(serializers.ModelSerializer):
             "threat_name_display",
             "taxonomy_entries",
             "component_name",
+            "threat_personas",
+            "threat_sources",
             "countermeasures",
         ]
 
@@ -231,6 +241,18 @@ class ComponentInstanceThreatSerializer(serializers.ModelSerializer):
             ).data
         return obj.taxonomy_snapshot
 
+    def get_threat_personas(self, obj):
+        return [
+            {"id": link.persona.id, "name": link.persona.name}
+            for link in obj.persona_links.select_related("persona").all()
+        ]
+
+    def get_threat_sources(self, obj):
+        return [
+            {"id": link.source.id, "name": link.source.name, "slug": link.source.slug}
+            for link in obj.source_links.select_related("source").all()
+        ]
+
     def get_countermeasures(self, obj):
         """Nested countermeasures (resolved at request time; serializer class is defined below)."""
         qs = obj.countermeasures.all().order_by("display_order", "created_at")
@@ -250,6 +272,8 @@ class DataFlowInstanceThreatSerializer(serializers.ModelSerializer):
     threat_name_display = serializers.SerializerMethodField()
     taxonomy_entries = serializers.SerializerMethodField()
     flow_label = serializers.CharField(source="data_flow.label", read_only=True)
+    threat_personas = serializers.SerializerMethodField()
+    threat_sources = serializers.SerializerMethodField()
 
     # Write fields - accept threat_name for custom threats
     threat_name = serializers.CharField(required=False, allow_blank=True, write_only=True)
@@ -272,6 +296,10 @@ class DataFlowInstanceThreatSerializer(serializers.ModelSerializer):
             "dismissal_reason",
             "format_metadata",
             "display_order",
+            "impact_description",
+            "threat_actor_text",
+            "threat_personas",
+            "threat_sources",
             "created_at",
             "updated_at",
         ]
@@ -282,6 +310,8 @@ class DataFlowInstanceThreatSerializer(serializers.ModelSerializer):
             "threat_name_display",
             "taxonomy_entries",
             "flow_label",
+            "threat_personas",
+            "threat_sources",
         ]
 
     def get_threat_name_display(self, obj):
@@ -302,6 +332,18 @@ class DataFlowInstanceThreatSerializer(serializers.ModelSerializer):
                 [j.taxonomy_entry for j in joins], many=True
             ).data
         return obj.taxonomy_snapshot
+
+    def get_threat_personas(self, obj):
+        return [
+            {"id": link.persona.id, "name": link.persona.name}
+            for link in obj.persona_links.select_related("persona").all()
+        ]
+
+    def get_threat_sources(self, obj):
+        return [
+            {"id": link.source.id, "name": link.source.name, "slug": link.source.slug}
+            for link in obj.source_links.select_related("source").all()
+        ]
 
     def create(self, validated_data):
         threat_library = validated_data.get("threat_library")
@@ -876,3 +918,43 @@ class RiskThreatSerializer(serializers.ModelSerializer):
     def get_is_dismissed(self, obj):
         threat = self._get_threat(obj)
         return threat.is_dismissed if threat else None
+
+
+class ThreatPersonaSerializer(serializers.ModelSerializer):
+    """Serializer for ThreatPersona CRUD."""
+
+    class Meta:
+        model = ThreatPersona
+        fields = [
+            "id",
+            "threat_model",
+            "symbolic_name",
+            "name",
+            "description",
+            "is_person",
+            "malicious_intent",
+            "skill_level",
+            "motivation",
+            "resources",
+            "objectives",
+            "format_metadata",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "created_at", "updated_at"]
+
+
+class ThreatSourceSerializer(serializers.ModelSerializer):
+    """Read-only serializer for ThreatSource reference data."""
+
+    class Meta:
+        model = ThreatSource
+        fields = [
+            "id",
+            "slug",
+            "name",
+            "description",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "slug", "name", "description", "created_at", "updated_at"]

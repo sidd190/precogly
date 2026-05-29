@@ -13,6 +13,7 @@ from rest_framework.views import APIView
 from rest_framework.exceptions import PermissionDenied
 
 from apps.core.permissions import CanWrite, IsSecurityTeam
+from apps.systems.models import OrgsystemComponent
 from apps.threat_models.models import ThreatModel
 
 from .models import (
@@ -30,6 +31,8 @@ from .models import (
     RiskThreat,
     TaxonomyEntry,
     ThreatLibrary,
+    ThreatPersona,
+    ThreatSource,
     VerificationTest,
 )
 from .scoring.registry import get_scoring_methods_list
@@ -63,6 +66,8 @@ from .serializers import (
     TaxonomyEntryNestedSerializer,
     ThreatLibraryListSerializer,
     ThreatLibrarySerializer,
+    ThreatPersonaSerializer,
+    ThreatSourceSerializer,
     VerificationTestSerializer,
 )
 from .services import recalculate_risk, recalculate_risks_for_threat, recalculate_threat_status
@@ -80,8 +85,43 @@ class ThreatLibraryViewSet(viewsets.ModelViewSet):
     ordering = ["name"]
 
     def get_queryset(self):
-        """Return all threats in the library."""
-        return ThreatLibrary.objects.all().select_related("source_pack")
+        """Return threats, optionally filtered by component's library and/or connected packs.
+
+        Query params:
+            component_id: If provided, returns only threats linked to that
+            component's component_library via ComponentLibraryThreat.
+            Falls back to all threats if the component has no library.
+            threat_model: If provided, filters to threats from connected packs
+            (or with no source pack).
+        """
+        queryset = ThreatLibrary.objects.all().select_related("source_pack")
+
+        component_id = self.request.query_params.get("component_id")
+        if component_id:
+            try:
+                component = OrgsystemComponent.objects.get(pk=component_id)
+            except (OrgsystemComponent.DoesNotExist, ValueError):
+                return queryset
+
+            if component.component_library_id:
+                threat_ids = ComponentLibraryThreat.objects.filter(
+                    component_library_id=component.component_library_id,
+                ).values_list("threat_library_id", flat=True)
+                queryset = queryset.filter(id__in=threat_ids)
+
+        threat_model_id = self.request.query_params.get("threat_model")
+        if threat_model_id:
+            from apps.threat_models.models import ThreatModelLibraryPack
+
+            connected_pack_ids = ThreatModelLibraryPack.objects.filter(
+                threat_model_id=threat_model_id
+            ).values_list("library_pack_id", flat=True)
+            queryset = queryset.filter(
+                Q(source_pack_id__in=connected_pack_ids)
+                | Q(source_pack__isnull=True)
+            )
+
+        return queryset
 
     def get_serializer_class(self):
         """Return appropriate serializer."""
@@ -102,8 +142,27 @@ class CountermeasureLibraryViewSet(viewsets.ModelViewSet):
     ordering = ["name"]
 
     def get_queryset(self):
-        """Return all countermeasures in the library."""
-        return CountermeasureLibrary.objects.all().select_related("source_pack")
+        """Return countermeasures, optionally filtered by connected packs.
+
+        Query params:
+            threat_model: If provided, filters to countermeasures from connected
+            packs (or with no source pack).
+        """
+        queryset = CountermeasureLibrary.objects.all().select_related("source_pack")
+
+        threat_model_id = self.request.query_params.get("threat_model")
+        if threat_model_id:
+            from apps.threat_models.models import ThreatModelLibraryPack
+
+            connected_pack_ids = ThreatModelLibraryPack.objects.filter(
+                threat_model_id=threat_model_id
+            ).values_list("library_pack_id", flat=True)
+            queryset = queryset.filter(
+                Q(source_pack_id__in=connected_pack_ids)
+                | Q(source_pack__isnull=True)
+            )
+
+        return queryset
 
     def get_serializer_class(self):
         """Return appropriate serializer."""
@@ -736,6 +795,37 @@ class RiskViewSet(viewsets.ModelViewSet):
         risk.refresh_from_db()
         serializer = RiskDetailSerializer(risk, context=self.get_serializer_context())
         return Response(serializer.data)
+
+
+class ThreatPersonaViewSet(viewsets.ModelViewSet):
+    """CRUD ViewSet for ThreatPersona, scoped to a threat model."""
+
+    serializer_class = ThreatPersonaSerializer
+    permission_classes = [IsAuthenticated, CanWrite]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    search_fields = ["name", "symbolic_name"]
+    pagination_class = None
+
+    def get_queryset(self):
+        org_ids = self.request.user.organization_memberships.values_list(
+            "organization_id", flat=True
+        )
+        return ThreatPersona.objects.filter(
+            threat_model_id=self.kwargs["threat_model_pk"],
+            threat_model__organization_id__in=org_ids,
+        )
+
+    def perform_create(self, serializer):
+        serializer.save(threat_model_id=self.kwargs["threat_model_pk"])
+
+
+class ThreatSourceViewSet(viewsets.ReadOnlyModelViewSet):
+    """Read-only ViewSet for ThreatSource reference data."""
+
+    queryset = ThreatSource.objects.all()
+    serializer_class = ThreatSourceSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = None
 
 
 class ScoringMethodsView(APIView):

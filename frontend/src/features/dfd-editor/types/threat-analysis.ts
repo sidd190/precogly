@@ -164,6 +164,11 @@ export interface ComponentThreat {
   backendThreatId?: number
   backendComponentId?: number
   threatType?: 'component' | 'dataflow'
+  // Actor & impact fields
+  impactDescription?: string
+  threatActorText?: string
+  threatPersonas?: { id: number; name: string }[]
+  threatSources?: { id: number; name: string; slug?: string }[]
 }
 
 /**
@@ -383,6 +388,59 @@ export interface ProgressChecklistItem {
 }
 
 /**
+ * System definition item for completion status
+ */
+export interface SystemDefinitionItem {
+  id: string
+  label: string
+  checked: boolean
+  count: number
+  countLabel: string
+}
+
+/**
+ * Coverage item for completion status
+ */
+export interface CoverageItem {
+  id: string
+  label: string
+  numerator: number
+  denominator: number
+  percentage: number
+}
+
+/**
+ * A flagged item in a quality signal
+ */
+export interface QualitySignalFlaggedItem {
+  id: number
+  name: string
+  detail?: string
+  componentName?: string
+  flowLabel?: string
+}
+
+/**
+ * Quality signal result
+ */
+export interface QualitySignal {
+  id: string
+  status: 'ok' | 'warning'
+  okLabel: string
+  warningLabel: string
+  flaggedItems: QualitySignalFlaggedItem[]
+}
+
+/**
+ * Enhanced completion status structure
+ */
+export interface CompletionStatus {
+  systemDefinition: SystemDefinitionItem[]
+  coverage: CoverageItem[]
+  qualitySignals: QualitySignal[]
+}
+
+/**
  * Default progress checklist items
  */
 export const DEFAULT_PROGRESS_CHECKLIST: Omit<ProgressChecklistItem, 'checked'>[] = [
@@ -404,6 +462,7 @@ export interface WorkspaceThreatAnalysis {
   componentThreats: ComponentThreat[]
   systemContext: SystemContext
   progressChecklist: ProgressChecklistItem[]
+  completionStatus?: CompletionStatus
   createdAt: string
   updatedAt: string
 }

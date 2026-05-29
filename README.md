@@ -1,11 +1,20 @@
 # Precogly
 
+[![Latest Release](https://img.shields.io/github/v/release/precogly/precogly)](https://github.com/precogly/precogly/releases/latest)
+[![License](https://img.shields.io/github/license/precogly/precogly)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/precogly/precogly)](https://github.com/precogly/precogly/stargazers)
+[![Discord](https://img.shields.io/badge/Discord-Join%20Chat-5865F2?logo=discord&logoColor=white)](https://discord.gg/EMn653Qkq)
+![OWASP Project](https://img.shields.io/badge/OWASP-Project-blue?logo=owasp)
+
+> [!IMPORTANT]
+> **Precogly is now an OWASP project!** OWASP is the world's largest open-source application security community, and Precogly is proud to be part of it.
+
 ## The open-source alternative to commercial threat modeling platforms
 
 ### Quick Start
 
 ```bash
-  git clone https://github.com/precogly/precogly.git
+  git clone --branch v0.2.0 https://github.com/precogly/precogly.git
   cd precogly
   docker compose up --build
 ```
@@ -55,6 +64,10 @@ Precogly is designed for enterprise workflows, but smaller organizations can als
 - **Backend:** Django 5.1, Django REST Framework, PostgreSQL 16
 - **Infrastructure:** Docker, nginx (production)
 
+### Roadmap
+
+See the [v0.2.0 milestone](https://github.com/precogly/precogly/milestone/1) for what's coming next.
+
 ### Contributing
 
 - [Open an issue](https://github.com/precogly/precogly/issues)
@@ -62,6 +75,10 @@ Precogly is designed for enterprise workflows, but smaller organizations can als
 - Contribute to the codebase
 
 If you find Precogly useful, give the project a star!
+
+### Community
+
+Join the conversation on [Discord](https://discord.gg/EMn653Qkq).
 
 ### Need Help? Contact the Developer
 

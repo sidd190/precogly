@@ -26,6 +26,11 @@ export interface ComponentInstanceThreat {
   isDismissed: boolean
   dismissalReason: string
   formatMetadata: Record<string, unknown>
+  // Actor & impact fields
+  impactDescription?: string
+  threatActorText?: string
+  threatPersonas?: { id: number; name: string }[]
+  threatSources?: { id: number; name: string; slug?: string }[]
   createdAt: string
   updatedAt: string
   /** Populated on list/detail when nested serialization is enabled */
@@ -113,8 +118,12 @@ export const threatKeys = {
   componentThreats: (componentId: number) => [...threatKeys.all, 'component', componentId] as const,
   threatCountermeasures: (threatId: number) => [...threatKeys.all, 'countermeasures', threatId] as const,
   suggestedCountermeasures: (threatId: number) => [...threatKeys.all, 'suggested', threatId] as const,
-  threatLibrary: ['threat-library'] as const,
-  countermeasureLibrary: ['countermeasure-library'] as const,
+  threatLibrary: (componentId?: number | null, threatModelId?: string) =>
+    componentId
+      ? ['threat-library', componentId, threatModelId] as const
+      : ['threat-library', threatModelId] as const,
+  countermeasureLibrary: (threatModelId?: string) =>
+    ['countermeasure-library', threatModelId] as const,
 }
 
 // Query Hooks
@@ -149,15 +158,20 @@ export function useSuggestedCountermeasures(threatId: number | null) {
 }
 
 /**
- * Fetch all threats from the threat library.
+ * Fetch threats from the threat library.
+ * Optionally filter by a component's library via component_id query param.
+ * Optionally filter by connected packs via threat_model query param.
  */
-export function useThreatLibrary() {
+export function useThreatLibrary(componentId?: number | null, threatModelId?: string) {
   return useQuery({
-    queryKey: threatKeys.threatLibrary,
+    queryKey: threatKeys.threatLibrary(componentId, threatModelId),
     queryFn: async () => {
-      const response = await api.get<{ results: ThreatLibraryItem[] } | ThreatLibraryItem[]>(
-        '/threat-library/'
-      )
+      const params = new URLSearchParams()
+      if (componentId) params.set('component_id', String(componentId))
+      if (threatModelId) params.set('threat_model', threatModelId)
+      const queryString = params.toString()
+      const url = queryString ? `/threat-library/?${queryString}` : '/threat-library/'
+      const response = await api.get<{ results: ThreatLibraryItem[] } | ThreatLibraryItem[]>(url)
       return Array.isArray(response) ? response : response.results
     },
   })
@@ -166,14 +180,17 @@ export function useThreatLibrary() {
 /**
  * Fetch all countermeasures from the countermeasure library.
  * Optionally filter by applicable threat library ID.
+ * Optionally filter by connected packs via threat_model query param.
  */
-export function useCountermeasureLibrary(threatLibraryId?: number | null) {
+export function useCountermeasureLibrary(threatLibraryId?: number | null, threatModelId?: string) {
   return useQuery({
-    queryKey: [...threatKeys.countermeasureLibrary, threatLibraryId],
+    queryKey: [...threatKeys.countermeasureLibrary(threatModelId), threatLibraryId],
     queryFn: async () => {
-      const url = threatLibraryId
-        ? `/countermeasure-library/?applicable_threats=${threatLibraryId}`
-        : '/countermeasure-library/'
+      const params = new URLSearchParams()
+      if (threatLibraryId) params.set('applicable_threats', String(threatLibraryId))
+      if (threatModelId) params.set('threat_model', threatModelId)
+      const queryString = params.toString()
+      const url = queryString ? `/countermeasure-library/?${queryString}` : '/countermeasure-library/'
       const response = await api.get<{ results: CountermeasureLibraryItem[] } | CountermeasureLibraryItem[]>(url)
       return Array.isArray(response) ? response : response.results
     },
@@ -213,10 +230,13 @@ export function useCreateComponentThreat() {
       threatDescription?: string
       inherentSeverity: string
       status?: string
+      impactDescription?: string
+      threatActorText?: string
     }) => api.post<ComponentInstanceThreat>('/component-threats/', data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: threatKeys.all })
       queryClient.invalidateQueries({ queryKey: ['threat-model-threats'] })
+      queryClient.invalidateQueries({ queryKey: ['threat-models'] })
     },
   })
 }
@@ -236,10 +256,13 @@ export function useCreateFlowThreat() {
       threatDescription?: string
       inherentSeverity: string
       status?: string
+      impactDescription?: string
+      threatActorText?: string
     }) => api.post('/flow-threats/', data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: threatKeys.all })
       queryClient.invalidateQueries({ queryKey: ['threat-model-threats'] })
+      queryClient.invalidateQueries({ queryKey: ['threat-models'] })
     },
   })
 }
@@ -263,6 +286,7 @@ export function useCreateComponentCountermeasure() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: threatKeys.all })
       queryClient.invalidateQueries({ queryKey: ['threat-model-threats'] })
+      queryClient.invalidateQueries({ queryKey: ['threat-models'] })
     },
   })
 }
@@ -286,6 +310,7 @@ export function useCreateFlowCountermeasure() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: threatKeys.all })
       queryClient.invalidateQueries({ queryKey: ['threat-model-threats'] })
+      queryClient.invalidateQueries({ queryKey: ['threat-models'] })
     },
   })
 }
@@ -313,6 +338,8 @@ export function useApplyCountermeasure() {
     onSuccess: (_, { threatId }) => {
       queryClient.invalidateQueries({ queryKey: threatKeys.suggestedCountermeasures(threatId) })
       queryClient.invalidateQueries({ queryKey: threatKeys.all })
+      queryClient.invalidateQueries({ queryKey: ['threat-model-threats'] })
+      queryClient.invalidateQueries({ queryKey: ['threat-models'] })
     },
   })
 }
@@ -369,6 +396,7 @@ export function useUpdateFlowThreat() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: threatKeys.all })
       queryClient.invalidateQueries({ queryKey: ['threat-model-threats'] })
+      queryClient.invalidateQueries({ queryKey: ['threat-models'] })
     },
   })
 }
@@ -394,6 +422,7 @@ export function useDismissThreat() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: threatKeys.all })
       queryClient.invalidateQueries({ queryKey: ['threat-model-threats'] })
+      queryClient.invalidateQueries({ queryKey: ['threat-models'] })
     },
   })
 }
@@ -413,6 +442,7 @@ export function useRestoreThreat() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: threatKeys.all })
       queryClient.invalidateQueries({ queryKey: ['threat-model-threats'] })
+      queryClient.invalidateQueries({ queryKey: ['threat-models'] })
     },
   })
 }
@@ -438,6 +468,7 @@ export function useDismissFlowThreat() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: threatKeys.all })
       queryClient.invalidateQueries({ queryKey: ['threat-model-threats'] })
+      queryClient.invalidateQueries({ queryKey: ['threat-models'] })
     },
   })
 }
@@ -457,6 +488,7 @@ export function useRestoreFlowThreat() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: threatKeys.all })
       queryClient.invalidateQueries({ queryKey: ['threat-model-threats'] })
+      queryClient.invalidateQueries({ queryKey: ['threat-models'] })
     },
   })
 }
@@ -483,6 +515,7 @@ export function useUpdateCountermeasure() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: threatKeys.all })
       queryClient.invalidateQueries({ queryKey: ['threat-model-threats'] })
+      queryClient.invalidateQueries({ queryKey: ['threat-models'] })
     },
   })
 }
@@ -509,6 +542,7 @@ export function useUpdateFlowCountermeasure() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: threatKeys.all })
       queryClient.invalidateQueries({ queryKey: ['threat-model-threats'] })
+      queryClient.invalidateQueries({ queryKey: ['threat-models'] })
     },
   })
 }
@@ -525,6 +559,7 @@ export function useDeleteCountermeasure() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: threatKeys.all })
       queryClient.invalidateQueries({ queryKey: ['threat-model-threats'] })
+      queryClient.invalidateQueries({ queryKey: ['threat-models'] })
     },
   })
 }
@@ -541,6 +576,7 @@ export function useDeleteFlowCountermeasure() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: threatKeys.all })
       queryClient.invalidateQueries({ queryKey: ['threat-model-threats'] })
+      queryClient.invalidateQueries({ queryKey: ['threat-models'] })
     },
   })
 }
@@ -622,6 +658,11 @@ export interface BackendThreat {
   isDismissed: boolean
   dismissalReason: string
   displayOrder?: number
+  // Actor & impact fields
+  impactDescription?: string
+  threatActorText?: string
+  threatPersonas?: { id: number; name: string }[]
+  threatSources?: { id: number; name: string; slug?: string }[]
   countermeasures: BackendCountermeasure[]
 }
 
@@ -720,6 +761,11 @@ export function transformBackendThreatsToComponentThreats(
       backendThreatId: bt.id,
       backendComponentId: bt.componentId,
       threatType: bt.type,
+      // Actor & impact fields
+      impactDescription: bt.impactDescription || undefined,
+      threatActorText: bt.threatActorText || undefined,
+      threatPersonas: bt.threatPersonas,
+      threatSources: bt.threatSources,
     }
   })
 }
@@ -887,5 +933,41 @@ export function useApplyZoneProtections() {
       queryClient.invalidateQueries({ queryKey: ['threat-model-threats'] })
       queryClient.invalidateQueries({ queryKey: ['zone-protections'] })
     },
+  })
+}
+
+export function useDeleteComponent() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (componentId: number) => api.delete(`/components/${componentId}/`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: threatKeys.all })
+      queryClient.invalidateQueries({ queryKey: ['threat-model-threats'] })
+    },
+  })
+}
+
+/**
+ * Fetch threat personas for a threat model.
+ */
+export interface ThreatPersonaItem {
+  id: number
+  symbolicName: string
+  name: string
+  description: string
+  isPerson: boolean
+  maliciousIntent: boolean
+}
+
+export function useThreatPersonas(threatModelId: string | null | undefined) {
+  return useQuery({
+    queryKey: ['threat-personas', threatModelId],
+    queryFn: threatModelId
+      ? () => api.get<ThreatPersonaItem[]>(
+          `/threat-models/${threatModelId}/threat-personas/`
+        )
+      : skipToken,
+    staleTime: 5 * 60 * 1000,
   })
 }

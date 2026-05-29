@@ -120,17 +120,41 @@ def _cleanup_orphaned_records(old_canvas_data, new_canvas_data, threat_model):
 
     # 2. DataFlows (FK source/dest component -> CASCADE, delete before components)
     if orphaned_dataflow_ids:
+        # Capture affected risk IDs before CASCADE wipes RiskThreat links
+        affected_risk_ids = list(
+            RiskThreat.objects.filter(
+                flow_threat__data_flow_id__in=orphaned_dataflow_ids
+            ).values_list("risk_id", flat=True).distinct()
+        )
+
         count, _ = DataFlow.objects.filter(id__in=orphaned_dataflow_ids).delete()
         deleted_counts["dataflows"] = count
+
+        # Recalculate risks that lost threat links
+        for risk in Risk.objects.filter(id__in=affected_risk_ids):
+            recalculate_risk(risk)
 
     # 3. Components (CASCADE -> ComponentInstanceThreat -> ComponentInstanceCountermeasure)
     # Scope to this threat model to prevent cross-model deletion from corrupted canvas data
     if orphaned_component_ids:
+        # Capture affected risk IDs before CASCADE wipes RiskThreat links
+        affected_risk_ids = list(
+            RiskThreat.objects.filter(
+                Q(component_threat__component_id__in=orphaned_component_ids)
+                | Q(flow_threat__data_flow__source_component_id__in=orphaned_component_ids)
+                | Q(flow_threat__data_flow__dest_component_id__in=orphaned_component_ids)
+            ).values_list("risk_id", flat=True).distinct()
+        )
+
         count, _ = OrgsystemComponent.objects.filter(
             id__in=orphaned_component_ids,
             threat_model=threat_model,
         ).delete()
         deleted_counts["components"] = count
+
+        # Recalculate risks that lost threat links
+        for risk in Risk.objects.filter(id__in=affected_risk_ids):
+            recalculate_risk(risk)
 
     # 4. Trust zones
     if orphaned_zone_ids:
@@ -209,7 +233,7 @@ def sync_dfd_nodes_to_components(dfd, threat_model, old_canvas_data=None):
     created_count = 0
     threats_generated = 0
     node_component_map = {}
-    new_components = []
+    all_synced_components = []
 
     with transaction.atomic():
         # Sync trust zone nodes first (zones must exist before component assignment)
@@ -256,8 +280,8 @@ def sync_dfd_nodes_to_components(dfd, threat_model, old_canvas_data=None):
             node_type_to_category = {
                 "process": "process",
                 "datastore": "datastore",
-                "humanActor": "human_actor",
-                "systemActor": "system_actor",
+                "humanActor": "external_human_actor",
+                "systemActor": "external_system_actor",
             }
 
             # Get category for the component
@@ -315,7 +339,7 @@ def sync_dfd_nodes_to_components(dfd, threat_model, old_canvas_data=None):
                             data_sensitivity_level=node_data.get("data_sensitivity", "") if node_type in ("process", "datastore") else "",
                         )
                         created_count += 1
-                        new_components.append(component)
+                        all_synced_components.append(component)
                     else:
                         # No library change (or first assignment): update in place
                         component.name = label
@@ -336,10 +360,7 @@ def sync_dfd_nodes_to_components(dfd, threat_model, old_canvas_data=None):
                             component.threat_model = threat_model
                         component.save()
                         synced_count += 1
-
-                        # Generate threats if library was just assigned (null to non-null)
-                        if library_changed and new_library_id is not None:
-                            new_components.append(component)
+                        all_synced_components.append(component)
 
                 except OrgsystemComponent.DoesNotExist:
                     # Component was deleted, create new one
@@ -359,7 +380,7 @@ def sync_dfd_nodes_to_components(dfd, threat_model, old_canvas_data=None):
                         data_sensitivity_level=node_data.get("data_sensitivity", "") if node_type in ("process", "datastore") else "",
                     )
                     created_count += 1
-                    new_components.append(component)
+                    all_synced_components.append(component)
             else:
                 # Create new component with no system assigned
                 # component_library may be None for actors without technology
@@ -379,7 +400,7 @@ def sync_dfd_nodes_to_components(dfd, threat_model, old_canvas_data=None):
                     data_sensitivity_level=node_data.get("data_sensitivity", "") if node_type in ("process", "datastore") else "",
                 )
                 created_count += 1
-                new_components.append(component)
+                all_synced_components.append(component)
                 synced_count += 1
 
             node_component_map[node_id] = component.id
@@ -443,8 +464,8 @@ def sync_dfd_nodes_to_components(dfd, threat_model, old_canvas_data=None):
                 parent_component_id=parent_component_db_id,
             )
 
-        # Auto-generate threats for new components
-        for component in new_components:
+        # Auto-generate threats for all synced components (idempotent via get_or_create)
+        for component in all_synced_components:
             if component.component_library:
                 generated = _generate_threats_for_component(component)
                 threats_generated += generated
@@ -490,21 +511,30 @@ def _find_component_library(technology: str, node_type: str):
     if not technology:
         return None
 
-    # Try exact match on slug first
-    component = ComponentLibrary.objects.filter(slug=technology).first()
+    node_type_to_category = {
+        "process": "process",
+        "datastore": "datastore",
+        "humanActor": "external_human_actor",
+        "systemActor": "external_system_actor",
+    }
+    category = node_type_to_category.get(node_type)
 
+    base_qs = ComponentLibrary.objects.all()
+    if category:
+        base_qs = base_qs.filter(category=category)
+
+    # Try exact match on slug first
+    component = base_qs.filter(slug=technology).first()
     if component:
         return component
 
     # Try name match (case-insensitive)
-    component = ComponentLibrary.objects.filter(name__iexact=technology).first()
-
+    component = base_qs.filter(name__iexact=technology).first()
     if component:
         return component
 
     # Try partial name match
-    component = ComponentLibrary.objects.filter(name__icontains=technology).first()
-
+    component = base_qs.filter(name__icontains=technology).first()
     return component
 
 
@@ -545,6 +575,19 @@ def _generate_countermeasures_for_threat(threat_instance):
     applicable_countermeasures = CountermeasureLibrary.objects.filter(
         applicable_threats=threat_instance.threat_library,
     )
+
+    # Filter by connected packs if the threat's component has a threat model.
+    # Allow countermeasures with no source_pack (custom/legacy) to always pass through.
+    if hasattr(threat_instance, 'component') and threat_instance.component and threat_instance.component.threat_model_id:
+        from apps.threat_models.models import ThreatModelLibraryPack
+
+        connected_pack_ids = ThreatModelLibraryPack.objects.filter(
+            threat_model_id=threat_instance.component.threat_model_id
+        ).values_list("library_pack_id", flat=True)
+        applicable_countermeasures = applicable_countermeasures.filter(
+            Q(source_pack_id__in=connected_pack_ids)
+            | Q(source_pack__isnull=True)
+        )
 
     created_count = 0
     has_platform_countermeasure = False
@@ -612,6 +655,19 @@ def _generate_threats_for_component(component):
         ],
     ).select_related("threat_library")
 
+    # Filter by connected packs if component has a threat model.
+    # Allow threats with no source_pack (custom/legacy) to always pass through.
+    if component.threat_model_id:
+        from apps.threat_models.models import ThreatModelLibraryPack
+
+        connected_pack_ids = ThreatModelLibraryPack.objects.filter(
+            threat_model_id=component.threat_model_id
+        ).values_list("library_pack_id", flat=True)
+        library_threats = library_threats.filter(
+            Q(threat_library__source_pack_id__in=connected_pack_ids)
+            | Q(threat_library__source_pack__isnull=True)
+        )
+
     created_count = 0
 
     for lib_threat in library_threats:
@@ -656,7 +712,7 @@ def _sync_edges_to_dataflows(dfd, edges, node_component_map):
     synced_count = 0
     created_count = 0
     threats_generated = 0
-    new_flows = []
+    all_synced_flows = []
     edge_dataflow_map = {}
 
     for edge in edges:
@@ -703,6 +759,7 @@ def _sync_edges_to_dataflows(dfd, edges, node_component_map):
                 dataflow.dest_component_id = target_component_id
                 dataflow.save()
                 synced_count += 1
+                all_synced_flows.append(dataflow)
             except DataFlow.DoesNotExist:
                 # DataFlow was deleted, create new one
                 dataflow = DataFlow.objects.create(
@@ -718,7 +775,8 @@ def _sync_edges_to_dataflows(dfd, edges, node_component_map):
                     data_classification=data_classification,
                 )
                 created_count += 1
-                new_flows.append(dataflow)
+                synced_count += 1
+                all_synced_flows.append(dataflow)
         else:
             # Create new DataFlow
             dataflow = DataFlow.objects.create(
@@ -734,7 +792,7 @@ def _sync_edges_to_dataflows(dfd, edges, node_component_map):
                 data_classification=data_classification,
             )
             created_count += 1
-            new_flows.append(dataflow)
+            all_synced_flows.append(dataflow)
             synced_count += 1
 
         edge_dataflow_map[edge_id] = dataflow.id
@@ -742,8 +800,8 @@ def _sync_edges_to_dataflows(dfd, edges, node_component_map):
     # Update canvas_data with dataflow_ids
     _update_canvas_with_dataflow_ids(dfd, edge_dataflow_map)
 
-    # Generate threats for new data flows
-    for dataflow in new_flows:
+    # Generate threats for all synced data flows (idempotent via get_or_create)
+    for dataflow in all_synced_flows:
         generated = _generate_threats_for_dataflow(dataflow)
         threats_generated += generated
 
@@ -810,6 +868,20 @@ def _generate_threats_for_dataflow(dataflow):
             ],
         ).select_related("threat_library").distinct()
 
+        # Filter by connected packs if dataflow has a threat model.
+        # Allow threats with no source_pack (custom/legacy) to always pass through.
+        threat_model_id = getattr(source_component, "threat_model_id", None) or getattr(dest_component, "threat_model_id", None)
+        if threat_model_id:
+            from apps.threat_models.models import ThreatModelLibraryPack
+
+            connected_pack_ids = ThreatModelLibraryPack.objects.filter(
+                threat_model_id=threat_model_id
+            ).values_list("library_pack_id", flat=True)
+            library_threats = library_threats.filter(
+                Q(threat_library__source_pack_id__in=connected_pack_ids)
+                | Q(threat_library__source_pack__isnull=True)
+            )
+
         for lib_threat in library_threats:
             # Avoid duplicate threats if both endpoints have the same threat
             if lib_threat.threat_library_id in seen_threat_ids:
@@ -824,33 +896,6 @@ def _generate_threats_for_dataflow(dataflow):
                     "inherent_severity": lib_threat.default_severity,
                     "status": DataFlowInstanceThreat.Status.EXPOSED,
                     # Copy metadata for self-sufficiency if library is later removed
-                    "threat_name": threat_lib.name if threat_lib else "",
-                    "threat_description": threat_lib.description if threat_lib else "",
-                    "taxonomy_snapshot": build_taxonomy_snapshot(threat_lib),
-                },
-            )
-            if created:
-                created_count += 1
-                # Auto-generate countermeasures for this new threat
-                _generate_countermeasures_for_flow_threat(threat_instance)
-
-    # If no component-specific threats were found, use generic dataflow threats
-    # This ensures data flows from/to actors still get threat coverage
-    if created_count == 0:
-        # Get generic dataflow threats (those with "dataflow" in slug)
-        generic_threats = ThreatLibrary.objects.filter(slug__icontains="dataflow")
-
-        for threat_lib in generic_threats:
-            if threat_lib.id in seen_threat_ids:
-                continue
-            seen_threat_ids.add(threat_lib.id)
-
-            threat_instance, created = DataFlowInstanceThreat.objects.get_or_create(
-                data_flow=dataflow,
-                threat_library=threat_lib,
-                defaults={
-                    "inherent_severity": "medium",  # Default severity for generic threats
-                    "status": DataFlowInstanceThreat.Status.EXPOSED,
                     "threat_name": threat_lib.name if threat_lib else "",
                     "threat_description": threat_lib.description if threat_lib else "",
                     "taxonomy_snapshot": build_taxonomy_snapshot(threat_lib),
@@ -881,6 +926,25 @@ def _generate_countermeasures_for_flow_threat(threat_instance):
     applicable_countermeasures = CountermeasureLibrary.objects.filter(
         applicable_threats=threat_instance.threat_library,
     )
+
+    # Filter by connected packs if the flow's component has a threat model.
+    # Allow countermeasures with no source_pack (custom/legacy) to always pass through.
+    data_flow = threat_instance.data_flow
+    threat_model_id = None
+    if hasattr(data_flow, "source_component") and data_flow.source_component:
+        threat_model_id = data_flow.source_component.threat_model_id
+    if not threat_model_id and hasattr(data_flow, "dest_component") and data_flow.dest_component:
+        threat_model_id = data_flow.dest_component.threat_model_id
+    if threat_model_id:
+        from apps.threat_models.models import ThreatModelLibraryPack
+
+        connected_pack_ids = ThreatModelLibraryPack.objects.filter(
+            threat_model_id=threat_model_id
+        ).values_list("library_pack_id", flat=True)
+        applicable_countermeasures = applicable_countermeasures.filter(
+            Q(source_pack_id__in=connected_pack_ids)
+            | Q(source_pack__isnull=True)
+        )
 
     created_count = 0
     has_platform_countermeasure = False

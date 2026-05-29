@@ -5,9 +5,8 @@ export interface UnifiedPack {
   description: string
   version: string
   packType: string
-  tier: string
-  source: string
   tags: string[]
+  relativePath: string
   componentCount: number
   threatCount: number
   isInDatabase: boolean

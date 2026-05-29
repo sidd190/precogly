@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import type { Diagram, ThreatModel } from '@/types'
 import type {
+  CompletionStatus,
   ComponentThreat,
   ComponentThreatCountermeasure,
   CountermeasureStatus,
@@ -477,9 +478,9 @@ export function useWorkspaceThreatAnalysis(
       datastores: allNodes.filter((n) => n.type === 'datastore').length
         + analysisOnly.filter((c) => c.category === 'datastore').length,
       humanActors: allNodes.filter((n) => n.type === 'humanActor').length
-        + analysisOnly.filter((c) => c.category === 'human_actor').length,
+        + analysisOnly.filter((c) => c.category === 'external_human_actor').length,
       systemActors: allNodes.filter((n) => n.type === 'systemActor').length
-        + analysisOnly.filter((c) => c.category === 'system_actor').length,
+        + analysisOnly.filter((c) => c.category === 'external_system_actor').length,
       trustZones: allNodes.filter((n) => n.type === 'trustZone').length,
     }
 
@@ -522,9 +523,16 @@ export function useWorkspaceThreatAnalysis(
     return []
   }, [threatModel?.workspaceData])
 
+  // Enhanced completion status from backend
+  const completionStatus: CompletionStatus | undefined = useMemo(() => {
+    const workspaceData = threatModel?.workspaceData as Record<string, unknown> | undefined
+    return workspaceData?.completionStatus as CompletionStatus | undefined
+  }, [threatModel?.workspaceData])
+
   return {
     componentThreats: state.componentThreats,
     progressChecklist,
+    completionStatus,
     summaries,
     isLoading: isLoadingThreats || isLoadingThreatModel,
     isLoadingThreats,

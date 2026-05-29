@@ -9,6 +9,7 @@ import type {
   LibraryPackListItem,
   PackDependencyCheck,
   PackFilters,
+  ValidationResult,
 } from '@/features/libraries/types/packs'
 
 // Query keys
@@ -20,7 +21,7 @@ export const packKeys = {
   detail: (id: number) => [...packKeys.details(), id] as const,
   dependencies: (id: number) => [...packKeys.all, 'dependencies', id] as const,
   preview: (id: number) => [...packKeys.all, 'preview', id] as const,
-  previewFromSource: (slug: string) => [...packKeys.all, 'preview-source', slug] as const,
+  previewFromSource: (packPath: string) => [...packKeys.all, 'preview-source', packPath] as const,
   availableFromSource: ['packs', 'available-from-source'] as const,
 }
 
@@ -31,12 +32,10 @@ export interface SourcePackInfo {
   description: string
   version: string
   packType: string
-  tier: string
-  source: string
   author: string
-  industries: string[]
   tags: string[]
   path: string
+  relativePath: string
   isInDatabase: boolean
   databaseVersion: string | null
   needsUpdate: boolean
@@ -66,6 +65,7 @@ export interface ImportResult {
   templatesCreated: number
   taxonomiesCreated: number
   errors: string[]
+  warnings: string[]
 }
 
 export interface SyncFromSourceResponse {
@@ -131,10 +131,8 @@ export interface PackPreviewResponse {
     description: string
     version: string
     packType: string
-    tier: string
     author: string
     tags: string[]
-    industries: string[]
   }
   components: PackPreviewComponent[]
   threats: PackPreviewThreat[]
@@ -160,11 +158,6 @@ export interface AvailableOverlaysResponse {
 // Build query string from filters
 function buildQueryString(filters: PackFilters): string {
   const params = new URLSearchParams()
-  if (filters.packType) params.append('pack_type', filters.packType)
-  if (filters.tier) params.append('tier', filters.tier)
-  if (filters.source) params.append('source', filters.source)
-  if (filters.industry) params.append('industry', filters.industry)
-  if (filters.tag) params.append('tag', filters.tag)
   if (filters.search) params.append('search', filters.search)
   const query = params.toString()
   return query ? `?${query}` : ''
@@ -257,15 +250,18 @@ export function useImportSinglePack() {
       slug,
       force = false,
       selectedOverlays,
+      skipValidation = false,
     }: {
       slug: string
       force?: boolean
       selectedOverlays?: string[] | null
+      skipValidation?: boolean
     }) =>
       api.post<ImportResult>('/packs/import_single/', {
         slug,
         force,
         selectedOverlays,
+        skipValidation,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: packKeys.all })
@@ -279,14 +275,28 @@ export function useImportSinglePack() {
 /**
  * Fetch available framework overlays for a pack before import.
  */
-export function usePackOverlays(slug: string | null) {
+export function usePackOverlays(packPath: string | null) {
   return useQuery({
-    queryKey: [...packKeys.all, 'overlays', slug],
+    queryKey: [...packKeys.all, 'overlays', packPath],
     queryFn: () =>
       api.get<AvailableOverlaysResponse>(
-        `/packs/available_overlays/?slug=${slug}`
+        `/packs/available_overlays/?path=${encodeURIComponent(packPath!)}`
       ),
-    enabled: slug !== null,
+    enabled: packPath !== null,
+  })
+}
+
+// =============================================================================
+// Pack Validation
+// =============================================================================
+
+/**
+ * Validate a pack's YAML references without importing (dry-run).
+ */
+export function useValidatePack() {
+  return useMutation({
+    mutationFn: ({ slug }: { slug: string }) =>
+      api.post<ValidationResult>('/packs/validate/', { slug }),
   })
 }
 
@@ -306,14 +316,16 @@ export function usePackPreview(id: number | null) {
 }
 
 /**
- * Fetch full pack contents for preview (source packs by slug).
+ * Fetch full pack contents for preview (source packs by path).
  */
-export function useSourcePackPreview(slug: string | null) {
+export function useSourcePackPreview(packPath: string | null) {
   return useQuery({
-    queryKey: packKeys.previewFromSource(slug!),
+    queryKey: packKeys.previewFromSource(packPath!),
     queryFn: () =>
-      api.get<PackPreviewResponse>(`/packs/preview_from_source/?slug=${slug}`),
-    enabled: slug !== null,
+      api.get<PackPreviewResponse>(
+        `/packs/preview_from_source/?path=${encodeURIComponent(packPath!)}`
+      ),
+    enabled: packPath !== null,
   })
 }
 

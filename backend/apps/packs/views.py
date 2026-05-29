@@ -45,19 +45,14 @@ class LibraryPackViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated]
     pagination_class = None
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ["pack_type", "tier", "source"]
-    search_fields = ["name", "description", "author", "tags", "industries"]
-    ordering_fields = ["name", "install_count", "created_at", "published_at"]
-    ordering = ["-install_count", "name"]
+    filterset_fields = ["pack_type"]
+    search_fields = ["name", "description", "author", "tags"]
+    ordering_fields = ["name", "created_at"]
+    ordering = ["name"]
 
     def get_queryset(self):
-        """Return published packs, optionally filtered by industry."""
-        queryset = LibraryPack.objects.filter(is_published=True)
-
-        # Filter by industry if provided
-        industry = self.request.query_params.get("industry")
-        if industry:
-            queryset = queryset.filter(industries__contains=[industry])
+        """Return all packs, optionally filtered by tag."""
+        queryset = LibraryPack.objects.all()
 
         # Filter by tag if provided
         tag = self.request.query_params.get("tag")
@@ -87,7 +82,7 @@ class LibraryPackViewSet(viewsets.ReadOnlyModelViewSet):
         dependencies = []
         missing_dependencies = []
 
-        for dep in pack.dependencies.filter(is_optional=False):
+        for dep in pack.dependencies.all():
             dep_pack = dep.depends_on_pack
             is_imported = dep_pack.id in imported_pack_ids
 
@@ -97,7 +92,6 @@ class LibraryPackViewSet(viewsets.ReadOnlyModelViewSet):
                     "slug": dep_pack.slug,
                     "name": dep_pack.name,
                     "version": dep_pack.version,
-                    "version_constraint": dep.version_constraint,
                     "is_imported": is_imported,
                 }
             )
@@ -147,6 +141,23 @@ class LibraryPackViewSet(viewsets.ReadOnlyModelViewSet):
         successful = [r for r in results if r.success]
         failed = [r for r in results if not r.success]
 
+        # Auto-connect all successfully synced packs to all threat models
+        if successful:
+            from apps.threat_models.models import ThreatModel, ThreatModelLibraryPack
+
+            synced_slugs = [r.pack_slug for r in successful]
+            synced_packs = LibraryPack.objects.filter(slug__in=synced_slugs)
+            threat_models = ThreatModel.objects.all()
+            associations = [
+                ThreatModelLibraryPack(threat_model=tm, library_pack=pack)
+                for tm in threat_models
+                for pack in synced_packs
+            ]
+            if associations:
+                ThreatModelLibraryPack.objects.bulk_create(
+                    associations, ignore_conflicts=True
+                )
+
         return Response({
             "results": [r.to_dict() for r in results],
             "summary": {
@@ -173,6 +184,7 @@ class LibraryPackViewSet(viewsets.ReadOnlyModelViewSet):
         slug = request.data.get("slug")
         force = request.data.get("force", False)
         selected_overlays = request.data.get("selected_overlays")  # camelCase auto-converted by middleware
+        skip_validation = request.data.get("skip_validation", False)
 
         if not slug:
             return Response(
@@ -195,6 +207,7 @@ class LibraryPackViewSet(viewsets.ReadOnlyModelViewSet):
             Path(pack_info.path),
             force=force,
             selected_overlays=selected_overlays,
+            skip_validation=skip_validation,
         )
 
         # Handle ValidationResult (returned when validation finds issues)
@@ -206,6 +219,21 @@ class LibraryPackViewSet(viewsets.ReadOnlyModelViewSet):
             return Response(result.to_dict(), status=422)
 
         if result.success:
+            # Auto-connect to all existing threat models
+            from apps.threat_models.models import ThreatModel, ThreatModelLibraryPack
+
+            library_pack = LibraryPack.objects.filter(slug=slug).first()
+            if library_pack:
+                threat_models = ThreatModel.objects.all()
+                ThreatModelLibraryPack.objects.bulk_create(
+                    [
+                        ThreatModelLibraryPack(
+                            threat_model=tm, library_pack=library_pack
+                        )
+                        for tm in threat_models
+                    ],
+                    ignore_conflicts=True,
+                )
             return Response(result.to_dict(), status=status.HTTP_201_CREATED)
         else:
             return Response(result.to_dict(), status=status.HTTP_400_BAD_REQUEST)
@@ -224,26 +252,27 @@ class LibraryPackViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=False, methods=["get"])
     def preview_from_source(self, request):
         """
-        Get full pack contents for preview (source packs by slug).
+        Get full pack contents for preview (source packs by path).
 
         Query parameters:
-            slug: The pack slug to preview
+            path: The pack's relative path from libraries/packs root
+                  (e.g. "demo/aws-mini", "standards/nist-csf")
 
         Returns pack metadata along with all components, threats, and countermeasures.
         """
-        slug = request.query_params.get("slug")
+        pack_path = request.query_params.get("path")
 
-        if not slug:
+        if not pack_path:
             return Response(
-                {"error": "Pack slug is required"},
+                {"error": "Pack path is required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        preview_data = get_pack_preview_from_source(slug)
+        preview_data = get_pack_preview_from_source(pack_path)
 
         if not preview_data:
             return Response(
-                {"error": f"Pack '{slug}' not found in libraries folder"},
+                {"error": f"Pack at '{pack_path}' not found in libraries folder"},
                 status=status.HTTP_404_NOT_FOUND,
             )
 
@@ -255,20 +284,21 @@ class LibraryPackViewSet(viewsets.ReadOnlyModelViewSet):
         Get available framework overlays for a pack before installation.
 
         Query parameters:
-            slug: The pack slug to check overlays for
+            path: The pack's relative path from libraries/packs root
+                  (e.g. "demo/aws-mini", "standards/nist-csf")
 
         Returns list of overlays with framework_id, framework_name, mapping_count,
         and whether the framework is installed.
         """
-        slug = request.query_params.get("slug")
+        pack_path = request.query_params.get("path")
 
-        if not slug:
+        if not pack_path:
             return Response(
-                {"error": "Pack slug is required"},
+                {"error": "Pack path is required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        overlays = get_available_overlays_for_pack(slug)
+        overlays = get_available_overlays_for_pack(pack_path)
 
         return Response({
             "overlays": [
@@ -344,7 +374,7 @@ class LibraryPackViewSet(viewsets.ReadOnlyModelViewSet):
 
         # Check if any other packs depend on this pack
         dependent_packs = list(
-            pack.dependents.filter(is_optional=False)
+            pack.dependents.all()
             .select_related("pack")
             .values_list("pack__slug", flat=True)
         )

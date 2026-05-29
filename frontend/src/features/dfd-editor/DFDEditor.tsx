@@ -537,6 +537,7 @@ function DFDEditorContent() {
           open={showTemplates}
           onOpenChange={setShowTemplates}
           onInsert={handleInsertTemplate}
+          threatModelId={threatModelId}
         />
       )}
 

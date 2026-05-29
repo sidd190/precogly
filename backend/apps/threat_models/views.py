@@ -14,9 +14,9 @@ from rest_framework.parsers import JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from apps.core.permissions import CanWrite
+from apps.core.permissions import CanWrite, IsSecurityTeam
 
-from .models import OutOfScopeItem, ThreatModel, ThreatModelReferenceImage
+from .models import OutOfScopeItem, ThreatModel, ThreatModelLibraryPack, ThreatModelReferenceImage
 from .serializers import (
     OutOfScopeItemSerializer,
     ThreatModelCreateSerializer,
@@ -234,6 +234,137 @@ class ThreatModelViewSet(viewsets.ModelViewSet):
             {"error": "System not associated with this threat model"},
             status=status.HTTP_404_NOT_FOUND,
         )
+
+    @action(detail=True, methods=["post"])
+    def remove_pack(self, request, pk=None):
+        """Remove a pack from this threat model."""
+        from apps.packs.models import LibraryPack, LibraryPackDependency
+
+        threat_model = self.get_object()
+        pack_id = request.data.get("pack_id")
+
+        if not pack_id:
+            return Response(
+                {"error": "pack_id is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        deleted, _ = ThreatModelLibraryPack.objects.filter(
+            threat_model=threat_model, library_pack_id=pack_id
+        ).delete()
+
+        if not deleted:
+            return Response(
+                {"error": "Pack not associated with this threat model"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Build dependency warnings
+        dependency_warnings = []
+        try:
+            removed_pack = LibraryPack.objects.get(id=pack_id)
+        except LibraryPack.DoesNotExist:
+            removed_pack = None
+
+        if removed_pack:
+            connected_pack_ids = set(
+                ThreatModelLibraryPack.objects.filter(
+                    threat_model=threat_model
+                ).values_list("library_pack_id", flat=True)
+            )
+
+            # Packs that depend on the removed pack
+            dependent_deps = LibraryPackDependency.objects.filter(
+                depends_on_pack=removed_pack,
+                pack_id__in=connected_pack_ids,
+            ).select_related("pack")
+            for dep in dependent_deps:
+                dependency_warnings.append({
+                    "pack": dep.pack.name,
+                    "message": (
+                        f"{dep.pack.name} (still connected) depends on {removed_pack.name}. "
+                        f"Threat and countermeasure generation from {removed_pack.name} "
+                        f"will no longer apply to this threat model."
+                    ),
+                })
+
+            # Packs the removed pack depends on: check if any other connected
+            # pack also depends on them
+            child_deps = LibraryPackDependency.objects.filter(
+                pack=removed_pack,
+            ).select_related("depends_on_pack")
+            for dep in child_deps:
+                child_pack = dep.depends_on_pack
+                other_dependents = LibraryPackDependency.objects.filter(
+                    depends_on_pack=child_pack,
+                    pack_id__in=connected_pack_ids,
+                ).exists()
+                if not other_dependents:
+                    dependency_warnings.append({
+                        "pack": child_pack.name,
+                        "message": (
+                            f"{child_pack.name} was a dependency of {removed_pack.name} "
+                            f"and no other connected pack uses it. "
+                            f"Consider removing it too if it is no longer needed."
+                        ),
+                    })
+
+        return Response({
+            "status": "pack removed",
+            "dependency_warnings": dependency_warnings,
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"])
+    def add_pack(self, request, pk=None):
+        """Add a pack to this threat model.
+
+        After connecting the pack, scans existing components on the TM
+        whose component_library belongs to the newly connected pack and
+        generates threats and countermeasures for each.
+        """
+        from apps.diagrams.services import _generate_threats_for_component
+        from apps.packs.models import LibraryPack
+        from apps.systems.models import OrgsystemComponent
+
+        threat_model = self.get_object()
+        pack_id = request.data.get("pack_id")
+
+        if not pack_id:
+            return Response(
+                {"error": "pack_id is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            library_pack = LibraryPack.objects.get(id=pack_id)
+        except LibraryPack.DoesNotExist:
+            return Response(
+                {"error": "Pack not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        _, created = ThreatModelLibraryPack.objects.get_or_create(
+            threat_model=threat_model, library_pack=library_pack
+        )
+
+        # Auto-materialize threats for existing components from this pack
+        threats_created = 0
+        components_matched = 0
+        if created:
+            matching_components = OrgsystemComponent.objects.filter(
+                threat_model=threat_model,
+                component_library__source_pack=library_pack,
+            )
+            with transaction.atomic():
+                for component in matching_components:
+                    components_matched += 1
+                    threats_created += _generate_threats_for_component(component)
+
+        return Response({
+            "status": "pack added",
+            "components_matched": components_matched,
+            "threats_created": threats_created,
+        }, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"])
     def add_referenced_model(self, request, pk=None):
@@ -508,6 +639,8 @@ class ThreatModelViewSet(viewsets.ModelViewSet):
                 "is_dismissed": threat.is_dismissed,
                 "dismissal_reason": threat.dismissal_reason,
                 "display_order": threat.display_order,
+                "impact_description": threat.impact_description,
+                "threat_actor_text": threat.threat_actor_text,
                 "countermeasures": [
                     {
                         "id": cm.id,
@@ -560,6 +693,8 @@ class ThreatModelViewSet(viewsets.ModelViewSet):
                 "is_dismissed": threat.is_dismissed,
                 "dismissal_reason": threat.dismissal_reason,
                 "display_order": threat.display_order,
+                "impact_description": threat.impact_description,
+                "threat_actor_text": threat.threat_actor_text,
                 "countermeasures": [
                     {
                         "id": cm.id,
@@ -619,6 +754,24 @@ class ThreatModelViewSet(viewsets.ModelViewSet):
         self.get_object()  # Permission check
         items = request.data.get("items", [])
         result = apply_zone_protections(items)
+        return Response(result)
+
+    @action(detail=True, methods=["get"])
+    def compliance_drift(self, request, pk=None):
+        """Check for compliance drift between instance and library mappings."""
+        from apps.threat_models.compliance_service import check_compliance_drift
+
+        threat_model = self.get_object()
+        result = check_compliance_drift(threat_model)
+        return Response(result)
+
+    @action(detail=True, methods=["post"])
+    def refresh_compliance(self, request, pk=None):
+        """Sync instance compliance mappings with library sources."""
+        from apps.threat_models.compliance_service import refresh_compliance_standards
+
+        threat_model = self.get_object()
+        result = refresh_compliance_standards(threat_model)
         return Response(result)
 
     @action(
@@ -689,8 +842,15 @@ class ThreatModelViewSet(viewsets.ModelViewSet):
         adapter = TmLibraryAdapter()
         export_data = adapter.export_data(threat_model)
 
+        import re
+
         response = JsonResponse(export_data, json_dumps_params={"indent": 2})
-        filename = f"{threat_model.name.replace(' ', '-').lower()}-threat-model.json"
+        safe_name = re.sub(r"[^a-z0-9\-]", "-", threat_model.name.lower())
+        safe_name = re.sub(r"-{2,}", "-", safe_name).strip("-")
+        if safe_name.endswith("-threat-model"):
+            filename = f"{safe_name}.json"
+        else:
+            filename = f"{safe_name}-threat-model.json"
         response["Content-Disposition"] = f'attachment; filename="{filename}"'
         return response
 

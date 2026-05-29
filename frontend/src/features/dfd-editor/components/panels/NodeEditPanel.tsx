@@ -368,6 +368,7 @@ export const NodeEditPanel = memo(function NodeEditPanel({
                     ? 'Select storage/database...'
                     : 'Select compute/backend...'
                 }
+                threatModelId={threatModelId}
               />
             </div>
 
@@ -680,6 +681,7 @@ export const NodeEditPanel = memo(function NodeEditPanel({
                 onChange={(value) => updateNodeData({ technology: value })}
                 filterNodeType="trustZone"
                 placeholder="Select networking/security..."
+                threatModelId={threatModelId}
               />
             </div>
 
@@ -772,6 +774,7 @@ export const NodeEditPanel = memo(function NodeEditPanel({
                 onChange={(value) => updateNodeData({ technology: value })}
                 filterNodeType="systemScope"
                 placeholder="Select infrastructure..."
+                threatModelId={threatModelId}
               />
             </div>
 

@@ -34,6 +34,7 @@ theme:
 
 nav:
   - Home: index.md
+  - Changelog: changelog.md
   - Getting Started:
       - Installation: getting-started/installation.md
       - Quickstart: getting-started/quickstart.md
@@ -55,6 +56,9 @@ nav:
       - Creating a Threat Model: guides/creating-threat-model.md
       - Importing & Exporting: guides/importing-exporting.md
       - Compliance Mapping: guides/compliance-mapping.md
+  - Recipes:
+      - IEC 62443: recipes/iec-62443.md
+      - EU Banking: recipes/eu-banking.md
   - API:
       - Overview: api/overview.md
   - Contributing:

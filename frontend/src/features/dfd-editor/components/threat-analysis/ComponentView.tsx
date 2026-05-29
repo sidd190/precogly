@@ -1,9 +1,19 @@
-import { Fragment, useState, useMemo, useCallback } from 'react'
+import { Fragment, useState, useMemo, useCallback, useRef } from 'react'
 import { toast } from 'sonner'
-import { Cog, Database, User, ChevronDown, ChevronUp, ChevronRight, X, Plus, ArrowRight, Shield, Building2, Lock, GripVertical } from 'lucide-react'
+import { Cog, Database, User, ChevronDown, ChevronUp, ChevronRight, X, Plus, ArrowRight, Shield, Building2, Lock, GripVertical, Loader2, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import {
   Select,
   SelectContent,
@@ -29,7 +39,15 @@ import {
 } from '../../types/threat-analysis'
 import { TaxonomyBadges } from '@/components/shared/TaxonomyBadges'
 import { EditComplianceMappingsDialog } from './EditComplianceMappingsDialog'
-import { parseCountermeasureId, useUpdateThreat, useUpdateFlowThreat } from '@/features/threat-models/api/threats'
+import {
+  parseCountermeasureId,
+  useDeleteCountermeasure,
+  useDeleteFlowCountermeasure,
+  useDeleteComponent,
+  useUpdateThreat,
+  useUpdateFlowThreat,
+  useThreatPersonas,
+} from '@/features/threat-models/api/threats'
 import {
   buildComponentTree,
   buildNodesMap,
@@ -37,7 +55,8 @@ import {
   getDirectProcessChildren,
 } from './hierarchy-utils'
 import { PRIORITY_CONFIG } from './severity-utils'
-import { SeverityAssessmentPanel } from './SeverityAssessmentPanel'
+import { SeverityAssessmentPanel, type SeverityAssessmentData } from './SeverityAssessmentPanel'
+import { ActorImpactPanel, type ActorImpactData } from './ActorImpactPanel'
 import { UserSearchCombobox } from './UserSearchCombobox'
 import { WaiverReasonInput } from './WaiverReasonInput'
 import { ComplianceDetailSection } from './ComplianceDetailSection'
@@ -138,7 +157,7 @@ function ThreatStatusBadge({ status }: { status: ThreatStatus }) {
 }
 
 export function ComponentView({
-  threatModelId: _threatModelId,
+  threatModelId,
   canvasData,
   analyzableComponents,
   trustZones,
@@ -182,6 +201,18 @@ export function ComponentView({
     name: string
     mappings: ComplianceStandardMapping[]
   } | null>(null)
+  // Track which countermeasure is being deleted
+  const [deleteCountermeasureConfirmFor, setDeleteCountermeasureConfirmFor] = useState<{
+    id: string
+    name: string
+    backendId: number
+    type: 'component' | 'flow'
+  } | null>(null)
+  // Track which component is being deleted
+  const [deleteComponentConfirmFor, setDeleteComponentConfirmFor] = useState<{
+    id: number
+    name: string
+  } | null>(null)
 
   // Resolve technology slugs to display names
   const { technologies } = useTechnologies()
@@ -196,27 +227,80 @@ export function ComponentView({
     [technologies]
   )
 
-  // Severity assessment mutations
+  // Threat update mutations
   const updateThreatMutation = useUpdateThreat()
   const updateFlowThreatMutation = useUpdateFlowThreat()
+  const deleteCountermeasureMutation = useDeleteCountermeasure()
+  const deleteFlowCountermeasureMutation = useDeleteFlowCountermeasure()
+  const deleteComponentMutation = useDeleteComponent()
 
-  const handleSeverityAssessment = useCallback((
-    threat: ComponentThreat,
-    data: { severityScoringMetadata: Record<string, unknown>; inherentSeverity: string }
-  ) => {
+  // Refs to collect latest data from child panels
+  const severityDataRef = useRef<SeverityAssessmentData | null>(null)
+  const actorImpactDataRef = useRef<ActorImpactData | null>(null)
+
+  // Unified save handler — merges severity + actor/impact data into one PATCH
+  const handleSaveThreat = useCallback((threat: ComponentThreat) => {
     if (!threat.backendThreatId) return
-    const onSuccess = () => {
-      toast.success('Severity assessment saved')
+    const data: Record<string, unknown> = {}
+    if (severityDataRef.current) {
+      data.severityScoringMetadata = severityDataRef.current.severityScoringMetadata
+      data.inherentSeverity = severityDataRef.current.inherentSeverity
     }
-    const onError = () => {
-      toast.error('Failed to save severity assessment')
+    if (actorImpactDataRef.current) {
+      data.impactDescription = actorImpactDataRef.current.impactDescription
+      data.threatActorText = actorImpactDataRef.current.threatActorText
     }
+    const onSuccess = () => { toast.success('Threat saved') }
+    const onError = () => { toast.error('Failed to save threat') }
     if (threat.threatType === 'dataflow') {
       updateFlowThreatMutation.mutate({ threatId: threat.backendThreatId, data }, { onSuccess, onError })
     } else {
       updateThreatMutation.mutate({ threatId: threat.backendThreatId, data }, { onSuccess, onError })
     }
   }, [updateThreatMutation, updateFlowThreatMutation])
+  
+  // Unified delete handler for countermeasures
+  const handleConfirmDeleteCountermeasure = useCallback(() => {
+    if (!deleteCountermeasureConfirmFor) return
+
+    const onSuccess = () => {
+      toast.success('Countermeasure deleted')
+      setDeleteCountermeasureConfirmFor(null)
+    }
+
+    const onError = () => {
+      toast.error('Failed to delete countermeasure')
+    }
+
+    if (deleteCountermeasureConfirmFor.type === 'flow') {
+      deleteFlowCountermeasureMutation.mutate(deleteCountermeasureConfirmFor.backendId, { onSuccess, onError })
+    } else {
+      deleteCountermeasureMutation.mutate(deleteCountermeasureConfirmFor.backendId, { onSuccess, onError })
+    }
+  }, [deleteCountermeasureConfirmFor, deleteCountermeasureMutation, deleteFlowCountermeasureMutation])
+
+  // Unified delete handler for components
+  const handleConfirmDeleteComponent = useCallback(() => {
+    if (!deleteComponentConfirmFor) return
+
+    const onSuccess = () => {
+      toast.success('Component deleted')
+      setDeleteComponentConfirmFor(null)
+    }
+
+    const onError = () => {
+      toast.error('Failed to delete component')
+    }
+
+    deleteComponentMutation.mutate(deleteComponentConfirmFor.id, { onSuccess, onError })
+  }, [deleteComponentConfirmFor, deleteComponentMutation])
+
+  // Fetch threat personas for the threat model
+  const { data: threatPersonas = [] } = useThreatPersonas(threatModelId)
+  const personas = useMemo(() =>
+    threatPersonas.map((p) => ({ id: p.id, name: p.name })),
+    [threatPersonas]
+  )
 
   const toggleComplianceExpanded = (cmId: string) => {
     setExpandedComplianceFor(prev => {
@@ -423,6 +507,7 @@ export function ComponentView({
                 onSelectComponent={onSelectComponent}
                 onToggleCollapsed={toggleNodeCollapsed}
                 resolveTechName={resolveTechName}
+                onRequestDeleteComponent={(component) => setDeleteComponentConfirmFor(component)}
               />
             ))}
 
@@ -840,16 +925,28 @@ export function ComponentView({
                           </div>
                         )}
                         {isSelected && (
-                          <div className="mt-1 ml-4">
+                          <div className="mt-1 ml-4 p-2 rounded-md bg-slate-50 border border-slate-200 space-y-3" onClick={(e) => e.stopPropagation()}>
                             <SeverityAssessmentPanel
                               threat={ct}
-                              onSave={(data) => handleSeverityAssessment(ct, data)}
-                              isSaving={
-                                ct.threatType === 'dataflow'
-                                  ? updateFlowThreatMutation.isPending
-                                  : updateThreatMutation.isPending
-                              }
+                              onChange={(data) => { severityDataRef.current = data }}
                             />
+                            <ActorImpactPanel
+                              threat={ct}
+                              personas={personas}
+                              onChange={(data) => { actorImpactDataRef.current = data }}
+                            />
+                            <Button
+                              size="sm"
+                              className="h-7 text-xs w-full"
+                              onClick={() => handleSaveThreat(ct)}
+                              disabled={updateThreatMutation.isPending || updateFlowThreatMutation.isPending}
+                            >
+                              {(updateThreatMutation.isPending || updateFlowThreatMutation.isPending) ? (
+                                <><Loader2 className="h-3 w-3 animate-spin mr-1" /> Saving...</>
+                              ) : (
+                                'Save'
+                              )}
+                            </Button>
                           </div>
                         )}
                       </div>
@@ -911,14 +1008,16 @@ export function ComponentView({
                             </span>
                             <TaxonomyBadges entries={ct.taxonomyEntries} maxVisible={1} size="sm" />
                           </div>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-7 text-xs text-blue-600 hover:text-blue-700 hover:bg-blue-50"
-                            onClick={() => onRestoreThreat(ct.id)}
-                          >
-                            Restore
-                          </Button>
+                          <div className="flex items-center gap-1">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 text-xs text-blue-600 hover:text-blue-700 hover:bg-blue-50"
+                              onClick={() => onRestoreThreat(ct.id)}
+                            >
+                              Restore
+                            </Button>
+                          </div>
                         </div>
                       )
                     })}
@@ -1004,6 +1103,10 @@ export function ComponentView({
                 renderItem={(cm, dragHandleRef, _isDragging) => {
                   const cmName = cm.countermeasureName || cm.countermeasureId
                   const cmDescription = cm.countermeasureDescription
+                  const canDelete = (() => {
+                    const parsed = parseCountermeasureId(cm.id)
+                    return parsed.id !== null && parsed.type !== 'local'
+                  })()
 
                   const statusConfig = COUNTERMEASURE_STATUS_CONFIG[cm.status]
                   const isAssigning = assigningOwnerFor === cm.id
@@ -1032,6 +1135,28 @@ export function ComponentView({
                             )}
                           </div>
                         </div>
+                        {canDelete && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              const parsed = parseCountermeasureId(cm.id)
+                              if (parsed.id === null || parsed.type === 'local') return
+                              setDeleteCountermeasureConfirmFor({
+                                id: cm.id,
+                                name: cmName,
+                                backendId: parsed.id,
+                                type: parsed.type,
+                              })
+                            }}
+                            aria-label={`Delete ${cmName}`}
+                            title="Delete countermeasure"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        )}
                       </div>
 
                       {/* Compliance mappings - expandable detail */}
@@ -1247,6 +1372,64 @@ export function ComponentView({
           libraryMappings={editingComplianceFor.mappings}
         />
       )}
+
+      <AlertDialog
+        open={!!deleteCountermeasureConfirmFor}
+        onOpenChange={(open) => {
+          if (!open) setDeleteCountermeasureConfirmFor(null)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete countermeasure?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently delete {deleteCountermeasureConfirmFor?.name || 'this countermeasure'}.
+              This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault()
+                handleConfirmDeleteCountermeasure()
+              }}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={!!deleteComponentConfirmFor}
+        onOpenChange={(open) => {
+          if (!open) setDeleteComponentConfirmFor(null)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete component?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently delete {deleteComponentConfirmFor?.name || 'this component'} and all of its associated threats and countermeasures.
+              This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault()
+                handleConfirmDeleteComponent()
+              }}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

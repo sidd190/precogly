@@ -9,7 +9,7 @@ from collections import defaultdict
 
 from django.db.models import Count, Q
 
-from apps.compliance.models import StandardFramework
+from apps.compliance.models import StandardFramework, StandardRequirementMapping
 from apps.systems.models import (
     ComponentDataAsset,
     DataAsset,
@@ -251,11 +251,11 @@ def _build_components(component_ids):
         category = comp.category or ""
         if category == "process":
             grouped["processes"].append(entry)
-        elif category == "dataStore":
+        elif category == "datastore":
             grouped["data_stores"].append(entry)
-        elif category == "humanActor":
+        elif category == "external_human_actor":
             grouped["human_actors"].append(entry)
-        elif category == "systemActor":
+        elif category == "external_system_actor":
             grouped["system_actors"].append(entry)
         else:
             grouped["processes"].append(entry)
@@ -383,6 +383,8 @@ def _build_threat_analysis(component_ids, dataflow_ids):
             "inherent_severity": threat.inherent_severity,
             "residual_severity": threat.residual_severity,
             "status": threat.status,
+            "impact_description": threat.impact_description,
+            "threat_actor_text": threat.threat_actor_text,
             "countermeasures": [
                 _serialize_countermeasure(cm)
                 for cm in threat.countermeasures.all()
@@ -405,6 +407,8 @@ def _build_threat_analysis(component_ids, dataflow_ids):
             "inherent_severity": threat.inherent_severity,
             "residual_severity": threat.residual_severity,
             "status": threat.status,
+            "impact_description": threat.impact_description,
+            "threat_actor_text": threat.threat_actor_text,
             "countermeasures": [
                 _serialize_countermeasure(cm)
                 for cm in threat.countermeasures.all()
@@ -474,7 +478,7 @@ def _build_countermeasure_summary(component_ids, dataflow_ids):
 
         if cm.status == "gap":
             gaps.append({
-                "id": cm.id,
+                "id": f"component-{cm.id}",
                 "countermeasure_name": cm_name,
                 "component_name": component_name,
                 "priority": cm.priority,
@@ -482,13 +486,13 @@ def _build_countermeasure_summary(component_ids, dataflow_ids):
             })
         elif cm.status == "waived":
             waived.append({
-                "id": cm.id,
+                "id": f"component-{cm.id}",
                 "countermeasure_name": cm_name,
                 "component_name": component_name,
             })
         if cm.is_inherited:
             inherited.append({
-                "id": cm.id,
+                "id": f"component-{cm.id}",
                 "countermeasure_name": cm_name,
                 "component_name": component_name,
                 "inherited_from_component_name": cm.inherited_from_component_name,
@@ -504,7 +508,7 @@ def _build_countermeasure_summary(component_ids, dataflow_ids):
 
         if cm.status == "gap":
             gaps.append({
-                "id": cm.id,
+                "id": f"flow-{cm.id}",
                 "countermeasure_name": cm_name,
                 "flow_label": flow_label,
                 "priority": cm.priority,
@@ -512,7 +516,7 @@ def _build_countermeasure_summary(component_ids, dataflow_ids):
             })
         elif cm.status == "waived":
             waived.append({
-                "id": cm.id,
+                "id": f"flow-{cm.id}",
                 "countermeasure_name": cm_name,
                 "flow_label": flow_label,
             })
@@ -573,37 +577,53 @@ def _build_risks(threat_model):
 
 
 def _build_compliance(threat_model, component_ids, dataflow_ids):
-    """Build compliance section with framework coverage.
+    """Build compliance section with framework coverage and satisfaction.
 
     Derives frameworks from instance-level compliance mappings rather than
     requiring explicit ThreatModelFramework associations.
+
+    Coverage: requirement has at least one countermeasure mapped to it.
+    Satisfaction: requirement has at least one countermeasure with status
+    "verified" or "platform".
     """
-    # Collect all covered (framework_id, requirement_id) pairs from instance-level mappings
+    satisfied_statuses = {"verified", "platform"}
+
+    # Collect all covered and satisfied (framework_id, requirement_id) pairs
     framework_coverage = defaultdict(set)
+    framework_satisfied = defaultdict(set)
 
     # From component countermeasure instance mappings
     component_standards = ComponentInstanceCountermeasureStandard.objects.filter(
         component_countermeasure__instance_threat__component_id__in=component_ids,
         requirement__isnull=False,
-    ).select_related("requirement__framework")
+    ).select_related("requirement__framework", "component_countermeasure")
 
     for mapping in component_standards:
-        framework_coverage[mapping.requirement.framework_id].add(mapping.requirement_id)
+        fw_id = mapping.requirement.framework_id
+        req_id = mapping.requirement_id
+        framework_coverage[fw_id].add(req_id)
+        if mapping.component_countermeasure.status in satisfied_statuses:
+            framework_satisfied[fw_id].add(req_id)
 
     # From flow countermeasure instance mappings
     flow_standards = FlowInstanceCountermeasureStandard.objects.filter(
         flow_countermeasure__flow_threat__data_flow_id__in=dataflow_ids,
         requirement__isnull=False,
-    ).select_related("requirement__framework")
+    ).select_related("requirement__framework", "flow_countermeasure")
 
     for mapping in flow_standards:
-        framework_coverage[mapping.requirement.framework_id].add(mapping.requirement_id)
+        fw_id = mapping.requirement.framework_id
+        req_id = mapping.requirement_id
+        framework_coverage[fw_id].add(req_id)
+        if mapping.flow_countermeasure.status in satisfied_statuses:
+            framework_satisfied[fw_id].add(req_id)
 
     # Build framework summaries
     frameworks = []
     if framework_coverage:
         for framework in StandardFramework.objects.filter(id__in=framework_coverage.keys()):
             covered_ids = framework_coverage[framework.id]
+            satisfied_ids = framework_satisfied.get(framework.id, set())
             total_requirements = framework.requirements.count()
             frameworks.append({
                 "name": framework.name,
@@ -614,10 +634,54 @@ def _build_compliance(threat_model, component_ids, dataflow_ids):
                     round(len(covered_ids) / total_requirements * 100, 1)
                     if total_requirements > 0 else 0
                 ),
+                "satisfied_requirements": len(satisfied_ids),
+                "satisfaction_percentage": (
+                    round(len(satisfied_ids) / total_requirements * 100, 1)
+                    if total_requirements > 0 else 0
+                ),
+            })
+
+    # Build cross-framework requirement mappings
+    cross_framework_mappings = []
+    framework_slugs = {fw["slug"] for fw in frameworks}
+
+    if len(framework_slugs) >= 2:
+        relevant_mappings = StandardRequirementMapping.objects.filter(
+            from_requirement__framework__slug__in=framework_slugs,
+            to_requirement__framework__slug__in=framework_slugs,
+        ).select_related(
+            "from_requirement__framework",
+            "to_requirement__framework",
+        )
+
+        # Group by (source_framework_slug, target_framework_slug)
+        groups = defaultdict(list)
+        for mapping in relevant_mappings:
+            key = (
+                mapping.from_requirement.framework.slug,
+                mapping.to_requirement.framework.slug,
+            )
+            groups[key].append({
+                "from_section_code": mapping.from_requirement.section_code,
+                "from_description": mapping.from_requirement.description,
+                "to_section_code": mapping.to_requirement.section_code,
+                "to_description": mapping.to_requirement.description,
+                "sufficiency": mapping.sufficiency,
+            })
+
+        # Build display names from frameworks already computed above
+        framework_name_by_slug = {fw["slug"]: fw["name"] for fw in frameworks}
+
+        for (source_slug, target_slug), mappings_list in groups.items():
+            cross_framework_mappings.append({
+                "source_framework": framework_name_by_slug.get(source_slug, source_slug),
+                "target_framework": framework_name_by_slug.get(target_slug, target_slug),
+                "mappings": mappings_list,
             })
 
     return {
         "frameworks": frameworks,
+        "cross_framework_mappings": cross_framework_mappings,
     }
 
 
@@ -683,10 +747,12 @@ def build_report_data(threat_model):
     compliance = _build_compliance(threat_model, component_ids, dataflow_ids)
     summary_metrics = _build_summary_metrics(threat_analysis, countermeasure_summary, risks)
 
-    # Reuse progress checklist from serializer
+    # Reuse completion status from serializer
     from apps.threat_models.serializers import ThreatModelSerializer
 
-    progress_checklist = ThreatModelSerializer()._compute_progress_checklist(threat_model)
+    serializer = ThreatModelSerializer()
+    completion_status = serializer._compute_completion_status(threat_model)
+    progress_checklist = serializer._flatten_to_legacy_checklist(completion_status)
 
     return {
         "metadata": metadata,
@@ -701,4 +767,5 @@ def build_report_data(threat_model):
         "compliance": compliance,
         "summary_metrics": summary_metrics,
         "progress_checklist": progress_checklist,
+        "completion_status": completion_status,
     }

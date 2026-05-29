@@ -4,7 +4,6 @@ Library Packs models - Bundles of technologies, threats, countermeasures, and te
 Packs enable:
 - Community-contributed library bundles
 - Industry-specific starter kits (banking, healthcare, etc.)
-- Premium/partner pack monetization
 - Version-controlled library updates
 """
 
@@ -29,17 +28,6 @@ class LibraryPack(TimestampedModel):
         FULL = "full", "Full Stack Pack"  # Contains multiple types
         TAXONOMY = "taxonomy", "Taxonomy Pack"
 
-    class Tier(models.TextChoices):
-        FREE = "free", "Free"
-        PREMIUM = "premium", "Premium"
-        ENTERPRISE = "enterprise", "Enterprise"
-
-    class Source(models.TextChoices):
-        OFFICIAL = "official", "Precogly Official"
-        PARTNER = "partner", "Partner"
-        COMMUNITY = "community", "Community"
-        PRIVATE = "private", "Private/Internal"
-
     # Identity
     slug = models.SlugField(
         max_length=100,
@@ -51,28 +39,14 @@ class LibraryPack(TimestampedModel):
 
     # Classification
     pack_type = models.CharField(max_length=20, choices=PackType.choices)
-    tier = models.CharField(max_length=20, choices=Tier.choices, default=Tier.FREE)
-    source = models.CharField(max_length=20, choices=Source.choices, default=Source.COMMUNITY)
 
     # Versioning
     version = models.CharField(max_length=20, help_text="Semantic version, e.g., '1.2.0'")
 
     # Metadata
     author = models.CharField(max_length=255, help_text="Author or organization name")
-    repository_url = models.URLField(
-        blank=True,
-        help_text="GitHub or registry URL for the pack source",
-    )
-    documentation_url = models.URLField(blank=True)
-    icon_url = models.URLField(blank=True)
 
     # Targeting
-    industries = ArrayField(
-        models.CharField(max_length=50),
-        default=list,
-        blank=True,
-        help_text="Industries this pack is relevant for, e.g., ['banking', 'fintech']",
-    )
     tags = ArrayField(
         models.CharField(max_length=50),
         default=list,
@@ -80,54 +54,17 @@ class LibraryPack(TimestampedModel):
         help_text="Tags for search/filtering, e.g., ['aws', 'cloud', 'serverless']",
     )
 
-    # Content - The actual items to be imported
-    # This JSON contains all the library items in the pack
-    content = models.JSONField(
-        default=dict,
-        help_text="Pack content: components, threats, countermeasures, templates, etc.",
-    )
-
-    # Note: Dependencies are managed through LibraryPackDependency model
-    # for version constraint support (see below)
-
-    # Stats
-    install_count = models.PositiveIntegerField(default=0)
-
-    # Publishing status
-    is_published = models.BooleanField(
-        default=False,
-        help_text="Whether the pack is visible in the public registry",
-    )
-    published_at = models.DateTimeField(null=True, blank=True)
-
     class Meta:
-        ordering = ["-install_count", "name"]
+        ordering = ["name"]
         verbose_name = "Library Pack"
         verbose_name_plural = "Library Packs"
 
     def __str__(self):
         return f"{self.name} v{self.version}"
 
-    @property
-    def is_free(self):
-        return self.tier == self.Tier.FREE
-
-    @property
-    def is_official(self):
-        return self.source == self.Source.OFFICIAL
-
 
 class LibraryPackDependency(TimestampedModel):
-    """
-    Explicit dependency between packs with version constraints.
-
-    Supports semantic versioning constraints like:
-    - "^1.0.0" - Compatible with 1.x.x (>=1.0.0 <2.0.0)
-    - "~1.2.0" - Compatible with 1.2.x (>=1.2.0 <1.3.0)
-    - ">=2.0.0" - Greater than or equal to 2.0.0
-    - ">=1.0.0 <2.0.0" - Range constraint
-    - "1.5.0" - Exact version
-    """
+    """Explicit dependency between packs."""
 
     pack = models.ForeignKey(
         LibraryPack,
@@ -141,15 +78,6 @@ class LibraryPackDependency(TimestampedModel):
         related_name="dependents",
         help_text="The pack being depended upon",
     )
-    version_constraint = models.CharField(
-        max_length=50,
-        blank=True,
-        help_text="SemVer constraint, e.g., '^1.0.0', '>=2.0.0', '~1.2.0'",
-    )
-    is_optional = models.BooleanField(
-        default=False,
-        help_text="Optional dependencies are not required for installation",
-    )
 
     class Meta:
         unique_together = ["pack", "depends_on_pack"]
@@ -157,9 +85,7 @@ class LibraryPackDependency(TimestampedModel):
         verbose_name_plural = "Pack Dependencies"
 
     def __str__(self):
-        constraint = f" {self.version_constraint}" if self.version_constraint else ""
-        optional = " (optional)" if self.is_optional else ""
-        return f"{self.pack.slug} -> {self.depends_on_pack.slug}{constraint}{optional}"
+        return f"{self.pack.slug} -> {self.depends_on_pack.slug}"
 
 
 class PendingFrameworkOverlay(TimestampedModel):
@@ -202,3 +128,52 @@ class PendingFrameworkOverlay(TimestampedModel):
 
     def __str__(self):
         return f"{self.pack.slug} -> {self.framework_slug} (pending)"
+
+
+class PendingRequirementOverlay(TimestampedModel):
+    """
+    Stores requirement-to-requirement overlays that could not be applied
+    because one or both frameworks were not installed when the pack was imported.
+
+    When a framework is later installed, pending requirement overlays
+    referencing that framework can be activated automatically.
+    """
+
+    pack = models.ForeignKey(
+        LibraryPack,
+        on_delete=models.CASCADE,
+        related_name="pending_requirement_overlays",
+        help_text="The pack that contains this overlay",
+    )
+    source_framework_slug = models.CharField(
+        max_length=100,
+        help_text="The slug of the source framework (from_requirement side)",
+    )
+    target_framework_slug = models.CharField(
+        max_length=100,
+        help_text="The slug of the target framework (to_requirement side)",
+    )
+    overlay_file_name = models.CharField(
+        max_length=255,
+        help_text="Name of the overlay file (e.g., 'requirements-iec-81001-5-1.yaml')",
+    )
+    overlay_data = models.JSONField(
+        default=dict,
+        help_text="The raw overlay data from the YAML file",
+    )
+    mapping_count = models.PositiveIntegerField(
+        default=0,
+        help_text="Number of mappings in this overlay",
+    )
+
+    class Meta:
+        unique_together = ["pack", "source_framework_slug", "target_framework_slug"]
+        verbose_name = "Pending Requirement Overlay"
+        verbose_name_plural = "Pending Requirement Overlays"
+        ordering = ["pack", "source_framework_slug", "target_framework_slug"]
+
+    def __str__(self):
+        return (
+            f"{self.pack.slug}: {self.source_framework_slug} -> "
+            f"{self.target_framework_slug} (pending)"
+        )
